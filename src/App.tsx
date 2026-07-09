@@ -377,9 +377,19 @@ export default function App() {
     };
   }, []);
 
+  const scrollToWorkspace = () => {
+    setTimeout(() => {
+      const workspace = document.getElementById("main-workspace");
+      if (workspace) {
+        workspace.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    }, 100);
+  };
+
   const navigateToTab = (tab: "book" | "dictionary" | "quiz" | "adventure" | "syllabus" | "print" | "game" | "dictation") => {
     setActiveTab(tab);
     window.history.pushState({ tab, unitId: selectedUnit.id, lessonId: selectedLesson.id }, "");
+    scrollToWorkspace();
   };
 
   const navigateToUnit = (unit: UnitItem) => {
@@ -391,6 +401,7 @@ export default function App() {
     setQuizScore(0);
     setQuizScoreFinished(false);
     window.history.pushState({ tab: activeTab, unitId: unit.id, lessonId: unit.lessons[0].id }, "");
+    scrollToWorkspace();
   };
 
   const navigateToLesson = (lesson: Lesson) => {
@@ -400,6 +411,7 @@ export default function App() {
     setQuizScore(0);
     setQuizScoreFinished(false);
     window.history.pushState({ tab: activeTab, unitId: selectedUnit.id, lessonId: lesson.id }, "");
+    scrollToWorkspace();
   };
 
   const navigateFull = (
@@ -418,6 +430,7 @@ export default function App() {
     setQuizScoreFinished(false);
 
     window.history.pushState({ tab, unitId: unit.id, lessonId: lesson.id }, "");
+    scrollToWorkspace();
   };
 
   const handleRemoveWatermark = () => {
