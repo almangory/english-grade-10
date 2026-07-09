@@ -821,6 +821,19 @@ export default function App() {
   // Synchronize first lesson whenever unit changes
   const handleUnitSelect = (unit: UnitItem) => {
     navigateToUnit(unit);
+    
+    // Switch to "book" tab if the current tab is not unit-based
+    if (!["book", "quiz", "game", "dictation"].includes(activeTab)) {
+      setActiveTab("book");
+    }
+
+    // Smoothly scroll down to the main interactive workspace to bring relevant content into view
+    setTimeout(() => {
+      const workspace = document.getElementById("main-workspace");
+      if (workspace) {
+        workspace.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    }, 120);
   };
 
   const handleLessonSelect = (lesson: Lesson) => {
@@ -1381,7 +1394,7 @@ export default function App() {
         </aside>
 
         {/* Central interactive screen workspace */}
-        <main className="lg:col-span-9 flex flex-col gap-6">
+        <main id="main-workspace" className="lg:col-span-9 flex flex-col gap-6">
           
           {/* Main Interactive Sub-tabs selection - Bento Style */}
           <div className="bg-white rounded-[32px] p-2 shadow-sm border-b-6 border-sky-100 flex flex-wrap gap-1.5 no-print">
