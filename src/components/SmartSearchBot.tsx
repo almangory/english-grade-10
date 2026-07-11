@@ -106,6 +106,16 @@ export default function SmartSearchBot({
     if (!botSoundEnabled) return;
     window.speechSynthesis.cancel();
 
+    // Stop any HTML5 audio playback (e.g. from the main reading aloud lesson/song)
+    document.querySelectorAll("audio").forEach((audio) => {
+      try {
+        audio.pause();
+        audio.src = "";
+      } catch (e) {
+        // ignore
+      }
+    });
+
     // Use clean voice text, removing markdown syntax
     const textToSpeak = englishTextOnly || text.replace(/[*#`_]/g, "");
     const utterance = new SpeechSynthesisUtterance(textToSpeak);

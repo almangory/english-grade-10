@@ -649,6 +649,10 @@ export default function App() {
   const [audioPlaybackActive, setAudioPlaybackActive] = useState(false);
   const [spokenWordIndex, setSpokenWordIndex] = useState<number | null>(null);
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
+  const lastSpeakTimeRef = useRef<number>(0);
+  const lastSpeakTextRef = useRef<string>("");
+  const speechTimeoutRef = useRef<any>(null);
+  const speechRequestIdRef = useRef<number>(0);
 
   // Word highlighting simulation for HTML Audio playback (when not using system voice)
   useEffect(() => {
@@ -855,10 +859,25 @@ export default function App() {
 
   // Text-To-Speech function using full-stack API or speech synthesis fallback
   const speakText = (text: string, voiceName: string = "Kore") => {
-    // If the exact same text is playing, toggle pause
-    if (speakingText === text && audioPlaybackActive) {
+    const now = Date.now();
+    const cleanText = text.trim();
+
+    // Prevent double voice activation / stuttering from touch + click events within 450ms
+    if (cleanText === lastSpeakTextRef.current && now - lastSpeakTimeRef.current < 450) {
+      return;
+    }
+    lastSpeakTimeRef.current = now;
+    lastSpeakTextRef.current = cleanText;
+
+    // Increment request ID to cancel/invalidate any currently running cascades
+    speechRequestIdRef.current += 1;
+    const currentRequestId = speechRequestIdRef.current;
+
+    // If the exact same text is playing (after debounce window), toggle pause
+    if (speakingText === cleanText && audioPlaybackActive) {
       if (audioPlayerRef.current) {
         audioPlayerRef.current.pause();
+        audioPlayerRef.current.src = "";
       }
       window.speechSynthesis.cancel();
       setAudioPlaybackActive(false);
@@ -870,17 +889,24 @@ export default function App() {
     // Cancel any previous audio immediately (prevents overlapping/stuck sounds)
     if (audioPlayerRef.current) {
       audioPlayerRef.current.pause();
+      audioPlayerRef.current.src = "";
     }
+    
+    // Clear any scheduled speech synthesis timeout to prevent overlapping voices
+    if (speechTimeoutRef.current) {
+      clearTimeout(speechTimeoutRef.current);
+      speechTimeoutRef.current = null;
+    }
+    
     window.speechSynthesis.cancel();
     setSpokenWordIndex(null);
 
-    const cleanText = text.trim();
     setSpeakingText(cleanText);
     setAudioPlaybackActive(true);
 
     // If System Voice mode is selected, speak synchronously to guarantee user-gesture context is kept intact
     if (voiceMode === "system") {
-      fallbackSpeechSynthesis(cleanText);
+      fallbackSpeechSynthesis(cleanText, currentRequestId);
       return;
     }
 
@@ -895,14 +921,21 @@ export default function App() {
     let currentSourceIndex = 0;
 
     const playNextSource = async () => {
+      // Abort if this request has been superceded by a newer click/tap
+      if (currentRequestId !== speechRequestIdRef.current) {
+        return;
+      }
+
       if (!audioPlayerRef.current) {
-        fallbackSpeechSynthesis(cleanText);
+        fallbackSpeechSynthesis(cleanText, currentRequestId);
         return;
       }
 
       if (currentSourceIndex >= sources.length) {
         console.warn("All direct stream providers failed or timed out. Defaulting to local System voice.");
-        fallbackSpeechSynthesis(cleanText);
+        if (currentRequestId === speechRequestIdRef.current) {
+          fallbackSpeechSynthesis(cleanText, currentRequestId);
+        }
         return;
       }
 
@@ -911,6 +944,8 @@ export default function App() {
       try {
         // 1. Check if we have this audio cached in our local Cache Storage
         const cachedBlobUrl = await getCachedAudioUrl(activeUrl);
+        if (currentRequestId !== speechRequestIdRef.current) return;
+
         if (cachedBlobUrl) {
           audioPlayerRef.current.src = cachedBlobUrl;
         } else {
@@ -929,6 +964,7 @@ export default function App() {
         }
       } catch (err) {
         console.warn("Offline cache check failed, falling back to direct network load", err);
+        if (currentRequestId !== speechRequestIdRef.current) return;
         audioPlayerRef.current.src = activeUrl;
       }
       
@@ -937,18 +973,21 @@ export default function App() {
       // Set the playback rate according to selected reading speed
       audioPlayerRef.current.playbackRate = readingSpeed;
       audioPlayerRef.current.onplay = () => {
+        if (currentRequestId !== speechRequestIdRef.current) return;
         if (audioPlayerRef.current) {
           audioPlayerRef.current.playbackRate = readingSpeed;
         }
       };
 
       audioPlayerRef.current.onended = () => {
+        if (currentRequestId !== speechRequestIdRef.current) return;
         setAudioPlaybackActive(false);
         setSpeakingText(null);
         setSpokenWordIndex(null);
       };
 
       audioPlayerRef.current.onerror = (e) => {
+        if (currentRequestId !== speechRequestIdRef.current) return;
         console.warn(`Source #${currentSourceIndex} (${activeUrl}) failed to load. Trying next provider.`);
         currentSourceIndex++;
         playNextSource();
@@ -957,6 +996,7 @@ export default function App() {
       const playPromise = audioPlayerRef.current.play();
       if (playPromise !== undefined) {
         playPromise.catch((err) => {
+          if (currentRequestId !== speechRequestIdRef.current) return;
           console.warn(`Autoplay or play issue with provider #${currentSourceIndex}:`, err);
           // Auto cascade to next source
           currentSourceIndex++;
@@ -969,7 +1009,9 @@ export default function App() {
       playNextSource();
     } catch (err) {
       console.warn("Audio element play sequence crashed, reverting to local voice synthesizer:", err);
-      fallbackSpeechSynthesis(cleanText);
+      if (currentRequestId === speechRequestIdRef.current) {
+        fallbackSpeechSynthesis(cleanText, currentRequestId);
+      }
     }
   };
 
@@ -1003,43 +1045,61 @@ export default function App() {
     return wordOffset;
   };
 
-  const fallbackSpeechSynthesis = (text: string) => {
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    
-    // Choose high quality English voices to avoid reading English text with Arabic or System voices
-    if (typeof window !== "undefined" && window.speechSynthesis) {
-      const voices = window.speechSynthesis.getVoices();
-      const englishVoice = voices.find(v => v.lang.startsWith("en-") && v.name.includes("Google")) 
-        || voices.find(v => v.lang.startsWith("en-") && (v.name.includes("Microsoft") || v.name.includes("Natural")))
-        || voices.find(v => v.lang.startsWith("en-")) 
-        || voices[0];
-      if (englishVoice) {
-        utterance.voice = englishVoice;
-      }
+  const fallbackSpeechSynthesis = (text: string, targetRequestId?: number) => {
+    const currentRequestId = targetRequestId ?? speechRequestIdRef.current;
+
+    if (speechTimeoutRef.current) {
+      clearTimeout(speechTimeoutRef.current);
     }
-
-    utterance.lang = "en-US";
-    utterance.rate = readingSpeed; // Speak according to selected reading speed
+    window.speechSynthesis.cancel();
     
-    utterance.onboundary = (event) => {
-      if (event.name === "word") {
-        const wordIdx = getWordIndexFromCharIndex(text, event.charIndex);
-        setSpokenWordIndex(wordIdx);
+    // Slight delay of 60ms allows the browser synthesis engine to fully clear and release audio channels, preventing stuttering or overlapping sounds
+    speechTimeoutRef.current = setTimeout(() => {
+      if (currentRequestId !== speechRequestIdRef.current) {
+        return;
       }
-    };
 
-    utterance.onend = () => {
-      setAudioPlaybackActive(false);
-      setSpeakingText(null);
-      setSpokenWordIndex(null);
-    };
-    utterance.onerror = () => {
-      setAudioPlaybackActive(false);
-      setSpeakingText(null);
-      setSpokenWordIndex(null);
-    };
-    window.speechSynthesis.speak(utterance);
+      const utterance = new SpeechSynthesisUtterance(text);
+      
+      // Choose high quality English voices to avoid reading English text with Arabic or System voices
+      if (typeof window !== "undefined" && window.speechSynthesis) {
+        const voices = window.speechSynthesis.getVoices();
+        const englishVoice = voices.find(v => v.lang.startsWith("en-") && v.name.includes("Google")) 
+          || voices.find(v => v.lang.startsWith("en-") && (v.name.includes("Microsoft") || v.name.includes("Natural")))
+          || voices.find(v => v.lang.startsWith("en-")) 
+          || voices[0];
+        if (englishVoice) {
+          utterance.voice = englishVoice;
+        }
+      }
+
+      utterance.lang = "en-US";
+      utterance.rate = readingSpeed; // Speak according to selected reading speed
+      
+      utterance.onboundary = (event) => {
+        if (currentRequestId !== speechRequestIdRef.current) return;
+        if (event.name === "word") {
+          const wordIdx = getWordIndexFromCharIndex(text, event.charIndex);
+          setSpokenWordIndex(wordIdx);
+        }
+      };
+
+      utterance.onend = () => {
+        if (currentRequestId !== speechRequestIdRef.current) return;
+        setAudioPlaybackActive(false);
+        setSpeakingText(null);
+        setSpokenWordIndex(null);
+        speechTimeoutRef.current = null;
+      };
+      utterance.onerror = () => {
+        if (currentRequestId !== speechRequestIdRef.current) return;
+        setAudioPlaybackActive(false);
+        setSpeakingText(null);
+        setSpokenWordIndex(null);
+        speechTimeoutRef.current = null;
+      };
+      window.speechSynthesis.speak(utterance);
+    }, 60);
   };
 
   // Helper to render interactive text where clicking a word pronounces it
@@ -1063,10 +1123,12 @@ export default function App() {
       const currentWordGlobalIdx = startWordOffset + wordCounter;
       wordCounter++;
 
-            const isHighlighted = speakingText !== null && 
+      const isHighlighted = speakingText !== null && 
         audioPlaybackActive && 
-        spokenWordIndex === currentWordGlobalIdx &&
-        (speakingText.includes(cleanWord) || speakingText.includes(text));
+        (
+          speakingText === cleanWord || 
+          (speakingText.includes(text) && spokenWordIndex === currentWordGlobalIdx)
+        );
       
       return (
         <InteractiveWord
@@ -1637,15 +1699,15 @@ export default function App() {
                             const offset = getLineWordOffset(selectedLesson.content.songText || "", idx);
                             if (line.trim().startsWith("•")) {
                               return (
-                                <p key={idx} className="text-md sm:text-lg font-black text-indigo-950 leading-relaxed pl-4 border-l-4 border-indigo-400 my-2">
+                                <div key={idx} className="text-md sm:text-lg font-black text-indigo-950 leading-relaxed pl-4 border-l-4 border-indigo-400 my-2">
                                   {renderInteractiveText(line.trim(), "Kore", offset)}
-                                </p>
+                                </div>
                               );
                             }
                             return (
-                              <p key={idx} className={`text-md sm:text-lg font-black text-indigo-950 leading-relaxed ${selectedLesson.type === "song" ? "text-center italic" : "text-left"} my-2`}>
+                              <div key={idx} className={`text-md sm:text-lg font-black text-indigo-950 leading-relaxed ${selectedLesson.type === "song" ? "text-center italic" : "text-left"} my-2`}>
                                 {renderInteractiveText(line, "Kore", offset)}
-                              </p>
+                              </div>
                             );
                           })}
                         </div>
@@ -1711,7 +1773,14 @@ export default function App() {
                                     )}
                                   </div>
                                 </div>
-                                <p className="text-[16px] font-black leading-snug">{renderInteractiveText(line.text, line.voice)}</p>
+                                <div 
+                                  className="text-[16px] font-black leading-snug"
+                                  onClick={(e) => e.stopPropagation()}
+                                  onTouchStart={(e) => e.stopPropagation()}
+                                  onTouchEnd={(e) => e.stopPropagation()}
+                                >
+                                  {renderInteractiveText(line.text, line.voice)}
+                                </div>
                               </motion.div>
                             </div>
                           );
